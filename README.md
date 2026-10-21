@@ -234,6 +234,7 @@ Open **[http://localhost:8001/dashboard/](http://localhost:8001/dashboard/)** in
 
 **Core Interface Features:**
 - **KPI Summary Cards:** Total interventions sent, average response time, turnaround hours saved, active bottleneck counter.
+- **Live Webhook Telemetry & Indicators:** Pulsing "Live Webhook Sync" status badge, instant flash banner for incoming events, glowing visual highlight (`⚡ Webhook Synced` / `⚡ Webhook Staged`) on affected cards, and an interactive "Live Feed & Simulator" drawer.
 - **Bottleneck Map:** Real-time visualization of delayed cases grouped by stage and assigned officer, progress bars against SLA limits, and one-click "Pause Agent / Resume Monitoring" toggles.
 - **Pending Approval Queue:** Human-in-the-Loop review queue for drafted Gemini reminders with "Approve & Send" and "Edit Draft" modal.
 - **Intervention History:** Comprehensive dispatch logs across Email, SMS, WhatsApp, and DigiValuer Core webhooks.

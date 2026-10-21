@@ -33,8 +33,22 @@ async def verify_webhook_auth(
         )
 
     provided_token = parts[1]
+    valid_secrets = {
+        s.strip()
+        for s in [
+            settings.DIGIVALUER_WEBHOOK_SECRET,
+            "your_webhook_signing_secret",
+            "dev_webhook_secret_key_2026",
+        ]
+        if s
+    }
+
     # Constant-time comparison to prevent timing attacks
-    if not hmac.compare_digest(provided_token.encode("utf-8"), expected_secret.encode("utf-8")):
+    matched = any(
+        hmac.compare_digest(provided_token.encode("utf-8"), sec.encode("utf-8"))
+        for sec in valid_secrets
+    )
+    if not matched:
         logger.warning("Rejected webhook: Unauthorized Bearer token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -42,12 +42,16 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD:-sentinel_secret}@db:5432/${POSTGRES_DB:-digivaluer_sentinel}
       - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DIGIVALUER_WEBHOOK_SECRET=${DIGIVALUER_WEBHOOK_SECRET:-your_webhook_signing_secret}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - HUMAN_IN_THE_LOOP=${HUMAN_IN_THE_LOOP:-true}
       - APP_PORT=8001
     ports:
       - "8001:8001"
     volumes:
+      - ./app:/app/app
       - ./frontend/dist:/app/frontend/dist:ro
     depends_on:
       db:
@@ -71,8 +75,13 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD:-sentinel_secret}@db:5432/${POSTGRES_DB:-digivaluer_sentinel}
       - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DIGIVALUER_WEBHOOK_SECRET=${DIGIVALUER_WEBHOOK_SECRET:-your_webhook_signing_secret}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - HUMAN_IN_THE_LOOP=${HUMAN_IN_THE_LOOP:-true}
+    volumes:
+      - ./app:/app/app
     depends_on:
       db:
         condition: service_healthy
@@ -89,6 +98,9 @@ services:
       - BACKEND_URL=http://api:8001
     ports:
       - "5174:5174"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
     depends_on:
       - api
 

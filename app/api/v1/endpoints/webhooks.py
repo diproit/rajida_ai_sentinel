@@ -1,14 +1,13 @@
 import logging
 from typing import Any
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.deps import verify_webhook_auth
 from app.core.redis import get_redis_client
-from app.db.session import get_async_session
+from app.db.session import async_session_maker, get_async_session
 from app.schemas.webhook import DigiValuerWebhookPayload, WebhookResponse
 from app.services.webhook_processor import process_webhook_payload
-from app.workers.celery_app import process_digivaluer_webhook_event
 
 logger = logging.getLogger("api.webhooks")
 router = APIRouter()
@@ -23,10 +22,11 @@ router = APIRouter()
 )
 async def receive_digivaluer_webhook(
     payload: DigiValuerWebhookPayload,
+    background_tasks: BackgroundTasks,
     authenticated: bool = Depends(verify_webhook_auth),
     session: AsyncSession = Depends(get_async_session),
 ) -> Any:
-    """Receive, deduplicate (via Redis SETNX), and enqueue DigiValuer webhook events."""
+    """Receive, deduplicate (via Redis SETNX), and immediately process DigiValuer webhook events."""
     event_id = payload.event_id
     dedup_key = f"sentinel:webhook:event:{event_id}"
 
@@ -43,28 +43,23 @@ async def receive_digivaluer_webhook(
                 action_taken="skipped",
             )
     except Exception as redis_exc:
-        logger.debug("Redis deduplication check skipped (Redis unavailable: %s)", redis_exc)
+        logger.debug("Redis deduplication check skipped: %s", redis_exc)
 
-    # 2. Dispatch to Celery Queue with resilient inline fallback
-    task_id = None
-    action_taken = "enqueued"
+    # 2. Run background processor immediately (guarantees execution and live SSE broadcast)
+    async def _run_background(p: DigiValuerWebhookPayload):
+        try:
+            async with async_session_maker() as new_session:
+                await process_webhook_payload(p, new_session)
+                logger.info("Webhook event %s processed successfully in background task", p.event_id)
+        except Exception as exc:
+            logger.error("Failed to process webhook event %s in background: %s", p.event_id, exc, exc_info=True)
 
-    try:
-        # Enqueue Celery task with JSON-serialized payload
-        payload_dict = payload.model_dump(mode="json")
-        task = process_digivaluer_webhook_event.delay(payload_dict)
-        task_id = str(task.id)
-        logger.info("Enqueued webhook event %s to Celery task %s", event_id, task_id)
-    except Exception as celery_exc:
-        logger.info("Celery unavailable (%s). Processing webhook event %s inline.", celery_exc, event_id)
-        # Resilient fallback: process directly using existing DB session
-        result = await process_webhook_payload(payload, session)
-        action_taken = result.get("action", "processed_inline")
+    background_tasks.add_task(_run_background, payload)
 
     return WebhookResponse(
         status="accepted",
         event_id=event_id,
         message="DigiValuer webhook accepted for processing.",
-        task_id=task_id,
-        action_taken=action_taken,
+        task_id=f"bg_{event_id[:8]}",
+        action_taken="processed",
     )

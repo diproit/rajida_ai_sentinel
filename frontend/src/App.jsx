@@ -17,7 +17,12 @@ import {
   ExternalLink,
   ChevronRight,
   Sparkles,
-  X
+  X,
+  Zap,
+  Radio,
+  Activity,
+  Layers,
+  ArrowRight
 } from 'lucide-react';
 
 const API_BASE = ''; // Uses Vite proxy to backend http://127.0.0.1:8001
@@ -36,6 +41,14 @@ export default function App() {
   const [approvingId, setApprovingId] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [toast, setToast] = useState(null);
+
+  // Real-Time Webhook & Telemetry State
+  const [sseConnected, setSseConnected] = useState(false);
+  const [webhookEvents, setWebhookEvents] = useState([]);
+  const [activeWebhookNotice, setActiveWebhookNotice] = useState(null);
+  const [highlightedCaseId, setHighlightedCaseId] = useState(null);
+  const [showWebhookModal, setShowWebhookModal] = useState(false);
+  const [simulatingWebhook, setSimulatingWebhook] = useState(false);
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
@@ -69,20 +82,59 @@ export default function App() {
     let eventSource;
     try {
       eventSource = new EventSource(`${API_BASE}/api/dashboard/events`);
+
+      eventSource.onopen = () => {
+        setSseConnected(true);
+      };
+
       eventSource.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);
-          if (payload.type && payload.type !== 'CONNECTED') {
+          if (payload.type === 'CONNECTED') {
+            setSseConnected(true);
+            return;
+          }
+          if (payload.type) {
+            setSseConnected(true);
+
+            // Record event in live stream buffer
+            const newEvent = {
+              id: payload.data?.event_id || `evt_${Date.now()}`,
+              type: payload.type,
+              caseNumber: payload.data?.case_number,
+              data: payload.data,
+              receivedAt: new Date().toLocaleTimeString(),
+            };
+            setWebhookEvents((prev) => [newEvent, ...prev.slice(0, 19)]);
+
+            // Highlight affected card in UI
+            if (payload.data?.case_number) {
+              setHighlightedCaseId(payload.data.case_number);
+              setTimeout(() => setHighlightedCaseId(null), 7000);
+            }
+
+            // Display persistent banner notice
+            setActiveWebhookNotice(payload);
+            setTimeout(() => {
+              setActiveWebhookNotice((curr) => (curr === payload ? null : curr));
+            }, 8000);
+
+            // Auto-refresh telemetry
             fetchDashboardData();
+
             if (payload.type === 'STATUS_CHANGED') {
-              showToast(`Webhook event: Case ${payload.data?.case_number || ''} transitioned to ${payload.data?.new_status || 'new status'}`);
+              showToast(`⚡ Webhook received: Case ${payload.data?.case_number || ''} status → ${payload.data?.new_status || 'updated'}`);
             } else if (payload.type === 'UNRESPONSIVE_PARTY' || payload.type === 'SLA_DELAY_WARNING') {
-              showToast(`Webhook alert: ${payload.type} on Case ${payload.data?.case_number || ''}`, 'error');
+              showToast(`⚡ Alert: ${payload.type} on Case ${payload.data?.case_number || ''}`, 'error');
             }
           }
         } catch (e) {
           console.debug('SSE parse error', e);
         }
+      };
+
+      eventSource.onerror = () => {
+        setSseConnected(false);
       };
     } catch (err) {
       console.debug('SSE connection skipped:', err);
@@ -96,9 +148,12 @@ export default function App() {
   // Keyboard accessibility: Close modal on Escape key & manage scroll lock
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape') setEditingIntervention(null);
+      if (e.key === 'Escape') {
+        setEditingIntervention(null);
+        setShowWebhookModal(false);
+      }
     };
-    if (editingIntervention) {
+    if (editingIntervention || showWebhookModal) {
       document.body.style.overflow = 'hidden';
       window.addEventListener('keydown', handleKeyDown);
     } else {
@@ -108,7 +163,69 @@ export default function App() {
       document.body.style.overflow = 'auto';
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [editingIntervention]);
+  }, [editingIntervention, showWebhookModal]);
+
+  const handleSimulateWebhook = async (type = 'UNRESPONSIVE_PARTY') => {
+    setSimulatingWebhook(true);
+    try {
+      const sampleCaseNo = 'MK-88A9C12E';
+      const payload = {
+        event_id: `evt_sim_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        source_system: 'mekamu_mowheel',
+        environment: 'production',
+        event_type: type,
+        severity: type === 'STATUS_CHANGED' ? 'MEDIUM' : 'CRITICAL',
+        category: type === 'STATUS_CHANGED' ? 'STATUS_TRANSITION' : 'VALUER_UNRESPONSIVE',
+        application: {
+          id: 'c88f9e20-7214-41bd-8c43-4c919d6756ec',
+          application_no: sampleCaseNo,
+          status: 'VALUATION_AND_INVESTIGATION_PROCESSING',
+          branch_name: 'Kandy Branch',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        assigned_party: {
+          role: 'VALUER',
+          user_id: 'usr_valuer_01',
+          name: 'Sunil Perera',
+          phone: '0771234567',
+          company_name: 'Lanka Valuers Ltd',
+          assigned_at: new Date().toISOString(),
+        },
+        metrics: {
+          elapsed_seconds: 7800,
+          sla_threshold_seconds: 7200,
+          delay_seconds: 600,
+        },
+        details: {
+          previous_status: 'DRAFT',
+          new_status: 'VALUATION_AND_INVESTIGATION_PROCESSING',
+          trigger_actor: 'fo@mekamu.com',
+          message: 'Valuer Sunil Perera has not submitted a valuation report within the 2-hour SLA window.',
+        },
+      };
+
+      const res = await fetch(`${API_BASE}/api/v1/webhooks/digivaluer`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer dev_webhook_secret_key_2026',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        showToast(`Simulated ${type} webhook dispatched successfully!`);
+      } else {
+        showToast('Webhook simulation request failed', 'error');
+      }
+    } catch (err) {
+      showToast('Error sending simulated webhook', 'error');
+    } finally {
+      setSimulatingWebhook(false);
+    }
+  };
 
   const handleManualScan = async () => {
     setScanning(true);
@@ -241,6 +358,31 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Live Webhook Ingestion Indicator */}
+            <button
+              onClick={() => setShowWebhookModal(true)}
+              className={`px-3 py-1.5 rounded-lg border text-xs font-medium flex items-center gap-2 transition cursor-pointer ${
+                sseConnected
+                  ? 'bg-emerald-950/50 text-emerald-300 border-emerald-800/60 hover:bg-emerald-900/40 shadow-sm'
+                  : 'bg-zinc-900/80 text-zinc-400 border-zinc-800 hover:bg-zinc-800'
+              }`}
+              title="Click to inspect real-time webhook ingestion log"
+            >
+              <span className="relative flex h-2 w-2">
+                {sseConnected && (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                )}
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${sseConnected ? 'bg-emerald-400' : 'bg-zinc-500'}`}></span>
+              </span>
+              <Zap className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden sm:inline">{sseConnected ? 'Live Webhook Sync' : 'Sync Disconnected'}</span>
+              {webhookEvents.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-mono border border-emerald-500/30">
+                  {webhookEvents.length}
+                </span>
+              )}
+            </button>
+
             <button
               onClick={() => { setRefreshing(true); fetchDashboardData(); }}
               disabled={refreshing}
@@ -309,6 +451,46 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* Real-Time Webhook Flash Banner */}
+      {activeWebhookNotice && (
+        <div className="bg-gradient-to-r from-emerald-950/90 via-zinc-900 to-zinc-950 border-b border-emerald-800/50 px-4 sm:px-6 lg:px-8 py-2.5 flex items-center justify-between text-xs transition-all shadow-lg shadow-emerald-950/20">
+          <div className="flex items-center gap-3">
+            <span className="p-1.5 rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center">
+              <Zap className="w-4 h-4 animate-bounce" />
+            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-emerald-300">Live Webhook Received:</span>
+              <span className="font-mono text-[11px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-200 border border-zinc-700">
+                {activeWebhookNotice.type}
+              </span>
+              <span className="text-zinc-300">
+                Case <strong className="text-zinc-100 font-mono">{activeWebhookNotice.data?.case_number}</strong>
+                {activeWebhookNotice.data?.new_status && ` → ${activeWebhookNotice.data.new_status}`}
+                {activeWebhookNotice.data?.category && ` (${activeWebhookNotice.data.category})`}
+              </span>
+              <span className="text-[11px] text-emerald-400/80 font-mono">
+                • Telemetry auto-refreshed
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowWebhookModal(true)}
+              className="text-xs text-emerald-400 hover:text-emerald-300 underline font-medium cursor-pointer"
+            >
+              Inspect Event
+            </button>
+            <button
+              onClick={() => setActiveWebhookNotice(null)}
+              className="p-1 text-zinc-500 hover:text-zinc-300 transition cursor-pointer"
+              title="Dismiss"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Container */}
       <main className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-1 w-full space-y-8">
@@ -392,7 +574,11 @@ export default function App() {
                 {bottlenecksData?.cases?.map((c) => (
                   <div
                     key={c.case_id}
-                    className={`sentinel-card p-5 flex flex-col justify-between transition-all ${
+                    className={`sentinel-card p-5 flex flex-col justify-between transition-all duration-300 ${
+                      highlightedCaseId === c.case_id
+                        ? 'ring-2 ring-emerald-400 shadow-xl shadow-emerald-500/20 scale-[1.01]'
+                        : ''
+                    } ${
                       c.is_paused
                         ? 'opacity-60 border-zinc-800'
                         : c.is_breached
@@ -403,9 +589,16 @@ export default function App() {
                     <div>
                       {/* Card Header */}
                       <div className="flex items-center justify-between mb-3">
-                        <span className="font-mono text-xs font-bold text-zinc-300 px-2 py-0.5 rounded bg-zinc-800/80 border border-zinc-700">
-                          {c.case_id}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-xs font-bold text-zinc-300 px-2 py-0.5 rounded bg-zinc-800/80 border border-zinc-700">
+                            {c.case_id}
+                          </span>
+                          {highlightedCaseId === c.case_id && (
+                            <span className="sentinel-badge-emerald animate-pulse">
+                              ⚡ Webhook Synced
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-1.5">
                           {c.is_paused ? (
                             <span className="px-2 py-0.5 text-[11px] font-medium rounded-full bg-zinc-800 text-zinc-400 border border-zinc-700">
@@ -522,13 +715,22 @@ export default function App() {
                 {draftedInterventions.map((inv) => (
                   <div
                     key={inv.id}
-                    className="sentinel-card p-5 space-y-4 hover:border-zinc-700/80 transition-all"
+                    className={`sentinel-card p-5 space-y-4 hover:border-zinc-700/80 transition-all duration-300 ${
+                      highlightedCaseId === inv.case_id
+                        ? 'ring-2 ring-emerald-400 shadow-xl shadow-emerald-500/20 scale-[1.005]'
+                        : ''
+                    }`}
                   >
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#1e1e24] pb-3">
                       <div className="flex items-center gap-3">
                         <span className="font-mono text-xs font-bold text-zinc-200 bg-zinc-800/90 px-2.5 py-1 rounded border border-zinc-700">
                           {inv.case_id}
                         </span>
+                        {highlightedCaseId === inv.case_id && (
+                          <span className="sentinel-badge-emerald animate-pulse">
+                            ⚡ Webhook Staged
+                          </span>
+                        )}
                         <span className="text-xs font-medium text-zinc-400">
                           Stage: <strong className="text-zinc-200">{inv.stage}</strong>
                         </span>
@@ -751,6 +953,158 @@ export default function App() {
               >
                 <Send className="w-3.5 h-3.5" />
                 <span>{savingEdit ? 'Processing...' : 'Save & Dispatch Now'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Real-Time Webhook Activity Modal */}
+      {showWebhookModal && (
+        <div
+          className="sentinel-modal-overlay"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowWebhookModal(false);
+          }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="webhook-modal-title"
+        >
+          <div className="sentinel-modal-container max-w-2xl">
+            {/* Modal Header */}
+            <div className="sentinel-modal-header">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shadow-sm">
+                  <Zap className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 id="webhook-modal-title" className="text-sm font-semibold text-zinc-100">
+                      DigiValuer Webhook Live Feed
+                    </h3>
+                    <span className={`px-2 py-0.5 text-[11px] font-semibold rounded-full border ${
+                      sseConnected
+                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
+                        : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                    }`}>
+                      {sseConnected ? 'SSE Connected' : 'Disconnected'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Real-time ingestion pipeline from DigiValuer (<code className="text-zinc-300">mekamu_mowheel</code>)
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowWebhookModal(false)}
+                className="sentinel-modal-close"
+                title="Close (Esc)"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="sentinel-modal-body space-y-4">
+              {/* Simulation Quick Bar */}
+              <div className="bg-[#121217] border border-[#27272a] rounded-lg p-3.5 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-zinc-300 flex items-center gap-1.5">
+                    <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Webhook Simulator (Test Live Indication)</span>
+                  </span>
+                  <span className="text-[11px] text-zinc-500 font-mono">POST /api/v1/webhooks/digivaluer</span>
+                </div>
+                <p className="text-[11px] text-zinc-400 leading-relaxed">
+                  Test the real-time visual pulse, toast notifications, card highlighting, and automatic data reload by dispatching a sample payload:
+                </p>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    onClick={() => handleSimulateWebhook('UNRESPONSIVE_PARTY')}
+                    disabled={simulatingWebhook}
+                    className="text-xs px-3 py-1.5 rounded-md bg-rose-950/60 text-rose-300 border border-rose-800/80 hover:bg-rose-900/60 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    <Zap className="w-3 h-3 text-rose-400" />
+                    <span>{simulatingWebhook ? 'Sending...' : 'Simulate UNRESPONSIVE_PARTY'}</span>
+                  </button>
+                  <button
+                    onClick={() => handleSimulateWebhook('STATUS_CHANGED')}
+                    disabled={simulatingWebhook}
+                    className="text-xs px-3 py-1.5 rounded-md bg-blue-950/60 text-blue-300 border border-blue-800/80 hover:bg-blue-900/60 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className="w-3 h-3 text-blue-400" />
+                    <span>{simulatingWebhook ? 'Sending...' : 'Simulate STATUS_CHANGED'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Ingested Events Stream */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                    Live Session Ingested Events ({webhookEvents.length})
+                  </h4>
+                  {webhookEvents.length > 0 && (
+                    <button
+                      onClick={() => setWebhookEvents([])}
+                      className="text-[11px] text-zinc-500 hover:text-zinc-300 underline cursor-pointer"
+                    >
+                      Clear Log
+                    </button>
+                  )}
+                </div>
+
+                {webhookEvents.length === 0 ? (
+                  <div className="bg-[#121217] border border-dashed border-[#27272a] rounded-lg p-8 text-center text-xs text-zinc-500 space-y-2">
+                    <Radio className="w-6 h-6 text-zinc-600 mx-auto animate-pulse" />
+                    <p>No webhooks received in this browser session yet.</p>
+                    <p className="text-[11px] text-zinc-600">
+                      Use the simulator buttons above or send a POST request with Bearer authentication.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5 max-h-[280px] overflow-y-auto pr-1">
+                    {webhookEvents.map((ev, idx) => (
+                      <div
+                        key={ev.id + idx}
+                        className="bg-[#121217] border border-[#27272a] rounded-lg p-3 text-xs space-y-1.5 transition-all hover:border-zinc-700"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono border ${
+                              ev.type === 'STATUS_CHANGED'
+                                ? 'bg-blue-950/80 text-blue-300 border-blue-800'
+                                : 'bg-rose-950/80 text-rose-300 border-rose-800'
+                            }`}>
+                              {ev.type}
+                            </span>
+                            <span className="font-mono font-bold text-zinc-200">
+                              {ev.caseNumber || 'General'}
+                            </span>
+                          </div>
+                          <span className="text-[11px] font-mono text-zinc-500">{ev.receivedAt}</span>
+                        </div>
+                        <p className="text-zinc-400 text-[11px] line-clamp-2">
+                          {ev.data?.message || ev.data?.details || `Status transition event for ${ev.caseNumber}`}
+                        </p>
+                        <div className="text-[10px] text-zinc-500 font-mono flex items-center justify-between border-t border-[#1e1e24] pt-1">
+                          <span>Event ID: {ev.id}</span>
+                          <span className="text-emerald-400">Processed & Synced</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="sentinel-modal-footer">
+              <button
+                onClick={() => setShowWebhookModal(false)}
+                className="sentinel-btn-secondary text-xs"
+              >
+                Close
               </button>
             </div>
           </div>

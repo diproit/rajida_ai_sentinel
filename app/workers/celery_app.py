@@ -5,10 +5,21 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+broker_url = (
+    settings.REDIS_URL
+    if ("localhost" in settings.CELERY_BROKER_URL and "localhost" not in settings.REDIS_URL)
+    else settings.CELERY_BROKER_URL
+)
+backend_url = (
+    settings.REDIS_URL
+    if ("localhost" in settings.CELERY_RESULT_BACKEND and "localhost" not in settings.REDIS_URL)
+    else settings.CELERY_RESULT_BACKEND
+)
+
 celery_app = Celery(
     "digivaluer_sentinel",
-    broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_RESULT_BACKEND,
+    broker=broker_url,
+    backend=backend_url,
 )
 
 celery_app.conf.update(

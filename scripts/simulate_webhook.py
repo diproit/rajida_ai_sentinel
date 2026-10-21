@@ -4,12 +4,29 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import os
+from pathlib import Path
 import sys
+import urllib.error
+import urllib.request
 import uuid
-import httpx
+
+
+def get_default_secret() -> str:
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+    if env_file.exists():
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DIGIVALUER_WEBHOOK_SECRET="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        return val
+    return os.getenv("DIGIVALUER_WEBHOOK_SECRET", "your_webhook_signing_secret")
+
 
 DEFAULT_URL = "http://localhost:8001/api/v1/webhooks/digivaluer"
-DEFAULT_TOKEN = "dev_webhook_secret_key_2026"
+DEFAULT_TOKEN = get_default_secret()
 
 
 def create_payload(
@@ -102,16 +119,24 @@ def main():
     headers = {
         "Authorization": f"Bearer {args.token}",
         "Content-Type": "application/json",
+        "User-Agent": "DigiValuer-Webhook-Simulator/1.0",
     }
 
     print(f"\n📡 Dispatching {args.type} webhook for {args.app_no} to {args.url}...")
     print(f"Payload event_id: {payload['event_id']}")
 
+    data_bytes = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(args.url, data=data_bytes, headers=headers, method="POST")
+
     try:
-        response = httpx.post(args.url, json=payload, headers=headers, timeout=10.0)
-        print(f"\nStatus Code: {response.status_code}")
-        print("Response Body:")
-        print(json.dumps(response.json(), indent=2))
+        with urllib.request.urlopen(req, timeout=10.0) as response:
+            resp_data = json.loads(response.read().decode("utf-8"))
+            print(f"\nStatus Code: {response.status}")
+            print("Response Body:")
+            print(json.dumps(resp_data, indent=2))
+    except urllib.error.HTTPError as err:
+        print(f"\n❌ HTTP Error {err.code}: {err.read().decode('utf-8')}", file=sys.stderr)
+        sys.exit(1)
     except Exception as exc:
         print(f"\n❌ Error dispatching webhook: {exc}", file=sys.stderr)
         sys.exit(1)
