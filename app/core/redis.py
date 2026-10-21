@@ -34,3 +34,22 @@ async def check_redis_connection() -> bool:
         return bool(await client.ping())
     except Exception:
         return False
+
+
+async def broadcast_sentinel_event(event_type: str, data: dict) -> None:
+    """Broadcast real-time Sentinel event to Redis pub/sub channel for live UI updates."""
+    import json
+    import logging
+    from datetime import datetime, timezone
+
+    logger = logging.getLogger("core.redis")
+    try:
+        client = get_redis_client()
+        message = json.dumps({
+            "type": event_type,
+            "data": data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        await client.publish("sentinel:events", message)
+    except Exception as exc:
+        logger.debug("Failed to broadcast event to Redis: %s", exc)

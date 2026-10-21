@@ -43,3 +43,18 @@ def run_sentinel_scan_task(force_dispatch: bool = False) -> dict:
     from app.worker import run_sentinel_scan
 
     return asyncio.run(run_sentinel_scan(force_dispatch=force_dispatch))
+
+
+@celery_app.task(name="app.workers.tasks.process_digivaluer_webhook_event")
+def process_digivaluer_webhook_event(payload_dict: dict) -> dict:
+    """Async background Celery task to process incoming DigiValuer webhook event."""
+    from app.db.session import async_session_maker
+    from app.schemas.webhook import DigiValuerWebhookPayload
+    from app.services.webhook_processor import process_webhook_payload
+
+    async def _run():
+        payload = DigiValuerWebhookPayload.model_validate(payload_dict)
+        async with async_session_maker() as session:
+            return await process_webhook_payload(payload, session)
+
+    return asyncio.run(_run())

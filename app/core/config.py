@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     DIGIVALUER_API_BASE_URL: str = "https://api.digivaluer.example.com/v1"
     DIGIVALUER_API_KEY: Optional[str] = None
     DIGIVALUER_API_TIMEOUT_SECONDS: int = 30
-    DIGIVALUER_WEBHOOK_SECRET: Optional[str] = None
+    DIGIVALUER_WEBHOOK_SECRET: str = "dev_webhook_secret_key_2026"
 
     # Agentic Workflow, Human-in-the-Loop & Polling
     HUMAN_IN_THE_LOOP: bool = True

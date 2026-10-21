@@ -14,6 +14,7 @@ class InterventionStatus(str, Enum):
     APPROVED = "APPROVED"
     SENT = "SENT"
     FAILED = "FAILED"
+    DISMISSED = "DISMISSED"
 
 
 class CommunicationChannel(str, Enum):

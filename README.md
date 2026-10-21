@@ -50,7 +50,7 @@ AIB-Sentinel/
 │   │   ├── __init__.py
 │   │   ├── config.py        # Pydantic Settings loaded from .env
 │   │   ├── database.py      # Database re-exports
-│   │   └── redis.py         # Async Redis connection manager and ping utilities
+│   │   └── redis.py         # Async Redis connection manager, pub/sub broadcaster & ping utilities
 │   ├── db/
 │   │   ├── __init__.py
 │   │   ├── session.py       # SQLModel async engine, sessionmaker, and table initializer
@@ -59,31 +59,37 @@ AIB-Sentinel/
 │   │   ├── __init__.py
 │   │   ├── agent.py         # CaseSLAConfig, AgentIntervention, EscalationRule, AgentMetrics
 │   │   └── valuation.py     # ValuationCase, WorkflowBottleneck, AgentActionLog
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   └── webhook.py       # Pydantic schema for DigiValuer webhook payloads & responses
 │   ├── api/
 │   │   ├── __init__.py
+│   │   ├── deps.py          # Webhook Bearer token authentication dependency
 │   │   └── v1/
 │   │       ├── __init__.py
 │   │       ├── api.py       # Aggregator for v1 routers
 │   │       └── endpoints/
 │   │           ├── __init__.py
 │   │           ├── health.py    # /health, /health/ready, /health/live probes
+│   │           ├── webhooks.py  # DigiValuer webhook ingestion (/api/v1/webhooks/digivaluer)
 │   │           └── workflows.py # Bottleneck listing and agentic scan triggers
 │   ├── routers/
 │   │   ├── __init__.py
-│   │   └── dashboard.py     # Operations Dashboard API (/api/dashboard/*)
+│   │   └── dashboard.py     # Operations Dashboard API & SSE stream (/api/dashboard/*)
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── digivaluer_client.py # DigiValuer API client & mock case simulation
 │   │   ├── notifier.py          # Multi-channel notifications (Email, SMS, WhatsApp, Webhooks)
 │   │   ├── pause_manager.py     # Redis-backed case monitoring pause/resume state
-│   │   └── sla_evaluator.py     # SLA calculation, cooling-off window & overdue detector
+│   │   ├── sla_evaluator.py     # SLA calculation, cooling-off window & overdue detector
+│   │   └── webhook_processor.py # Webhook event dispatcher (state sync, bottleneck auto-resolve)
 │   ├── agents/
 │   │   ├── __init__.py
 │   │   ├── base.py              # Google Gemini LLM factory via LangChain
 │   │   └── reminder_agent.py    # Context-aware reminder agent with structured outputs
 │   ├── workers/
 │   │   ├── __init__.py
-│   │   └── celery_app.py        # Celery app and scheduled scan tasks
+│   │   └── celery_app.py        # Celery app, scheduled scan tasks & async webhook task
 │   └── worker.py                # Core Sentinel worker scan cycle and periodic loop
 ├── frontend/                    # Operations Lead React + Vite Dashboard
 │   ├── index.html               # Single page application entry
@@ -91,11 +97,12 @@ AIB-Sentinel/
 │   ├── vite.config.js           # Dev server config & API reverse proxy
 │   ├── src/
 │   │   ├── main.jsx             # React DOM root
-│   │   ├── App.jsx              # Main Dashboard UI (Bottlenecks, Approvals, Metrics)
+│   │   ├── App.jsx              # Main Dashboard UI (SSE real-time listener, Bottlenecks, Approvals)
 │   │   └── index.css            # Tailwind typography and custom styles
 │   └── dist/                    # Compiled SPA bundle mounted at /dashboard/
 ├── scripts/
 │   ├── __init__.py
+│   ├── simulate_webhook.py      # CLI tool to dispatch sample DigiValuer webhooks
 │   ├── verify_reminder_agent.py # Agent reminder drafting verification script
 │   └── verify_dashboard.py      # End-to-end dashboard & intervention approval verification
 └── tests/
@@ -107,6 +114,7 @@ AIB-Sentinel/
     ├── test_health.py           # Unit & integration tests for health checks
     ├── test_notifier.py         # Email, SMS, WhatsApp & Webhook dispatcher tests
     ├── test_reminder_agent.py   # Reminder drafting agent and tone progression tests
+    ├── test_webhooks.py         # DigiValuer webhook ingestion, auth & deduplication tests
     └── test_worker.py           # Background scan and Human-in-the-Loop tests
 ```
 
@@ -135,6 +143,7 @@ Key environment variables:
 - `REDIS_URL`: Redis connection string (defaults to `redis://localhost:6379/0`)
 - `GEMINI_API_KEY`: Google Gemini API key for AI agent reasoning
 - `DIGIVALUER_API_BASE_URL`: Base URL for DigiValuer platform
+- `DIGIVALUER_WEBHOOK_SECRET`: Shared secret for authenticating incoming webhooks via `Authorization: Bearer <secret>` (defaults to `dev_webhook_secret_key_2026`)
 - `POLLING_INTERVAL_SECONDS`: Background cadence for inspecting active cases
 
 ### 3. Spin Up Docker Infrastructure
@@ -263,6 +272,10 @@ Response (`200 OK`):
 }
 ```
 
+### Webhook Ingestion & Real-Time APIs
+- **`POST /api/v1/webhooks/digivaluer`**: Ingests real-time events (`STATUS_CHANGED`, `UNRESPONSIVE_PARTY`, `SLA_DELAY_WARNING`) from DigiValuer (`mekamu_mowheel`). Authenticated via `Authorization: Bearer <DIGIVALUER_WEBHOOK_SECRET>`.
+- **`GET /api/dashboard/events`**: Server-Sent Events (SSE) stream broadcasting real-time case updates, bottlenecks, and interventions directly to the Ops Dashboard.
+
 ### Dashboard Management APIs
 - **`GET /api/dashboard/bottlenecks`**: Aggregates overdue cases grouped by stage and assigned officer, enriched with pause states.
 - **`GET /api/dashboard/interventions`**: Returns intervention history with status filters (`DRAFTED`, `APPROVED`, `SENT`, `FAILED`).
@@ -277,13 +290,106 @@ Response (`200 OK`):
 
 ---
 
+## ⚡ DigiValuer Webhook Integration & Real-Time Event Pipeline
+
+DigiValuer Sentinel provides an event-driven ingestion pipeline allowing the core DigiValuer platform (`mekamu_mowheel`) to push real-time valuation lifecycle events. This eliminates polling delays and allows instant triage of workflow stalls and unresponsive stakeholders.
+
+### 1. Ingestion Endpoint & Authentication
+- **Endpoint:** `POST /api/v1/webhooks/digivaluer`
+- **Authentication:** Static Bearer token in request header:
+  ```http
+  Authorization: Bearer dev_webhook_secret_key_2026
+  ```
+  *(Configured via `DIGIVALUER_WEBHOOK_SECRET` in `.env`)*
+- **Idempotency & Deduplication:** Incoming deliveries are deduplicated using Redis `SETNX` on key `sentinel:webhook:event:{event_id}` with a 48-hour expiration. Duplicate event deliveries return `200 OK` (`action_taken: "skipped"`).
+- **Asynchronous Task Queue:** Validated events immediately receive a `202 Accepted` response and are enqueued to Celery (`process_digivaluer_webhook_event`), with resilient inline fallback execution if workers are offline.
+
+### 2. DigiValuer Payload Schema
+```json
+{
+  "event_id": "7f9a2b10-6c3e-4d89-9a11-e63f5891d4e0",
+  "timestamp": "2026-10-21T10:35:00Z",
+  "source_system": "mekamu_mowheel",
+  "environment": "production",
+  "event_type": "STATUS_CHANGED",
+  "severity": "CRITICAL",
+  "category": "VALUER_UNRESPONSIVE",
+  "application": {
+    "id": "c88f9e20-7214-41bd-8c43-4c919d6756ec",
+    "application_no": "MK-88A9C12E",
+    "status": "VALUATION_AND_INVESTIGATION_PROCESSING",
+    "branch_id": "b3e945c2-192a-44e2-bca4-d19e9841f71a",
+    "branch_name": "Kandy Branch",
+    "created_at": "2026-10-21T08:00:00Z",
+    "updated_at": "2026-10-21T08:15:00Z"
+  },
+  "assigned_party": {
+    "role": "VALUER",
+    "user_id": "d14f2e50-99c1-4011-82a1-12c8a98b4ef2",
+    "name": "Sunil Perera",
+    "phone": "0771234567",
+    "company_name": "Lanka Valuers Ltd",
+    "assigned_at": "2026-10-21T08:15:00Z"
+  },
+  "metrics": {
+    "elapsed_seconds": 7800,
+    "sla_threshold_seconds": 7200,
+    "delay_seconds": 600
+  },
+  "details": {
+    "previous_status": "DRAFT",
+    "new_status": "VALUATION_AND_INVESTIGATION_PROCESSING",
+    "trigger_actor": "fo@mekamu.com",
+    "message": "Valuer Sunil Perera has not submitted a valuation report within the 2-hour SLA window."
+  }
+}
+```
+
+### 3. Event-Driven Actions Taken by Sentinel
+- **`STATUS_CHANGED`**:
+  - Updates or creates `ValuationCase` record in PostgreSQL (`case_number = application.application_no`, `status = new_status`).
+  - Auto-resolves open `WorkflowBottleneck` records for the previous stage.
+  - Automatically marks stale pending reminder drafts (`AgentIntervention`) for that stage as `DISMISSED`.
+  - Records an audit log entry in `agent_action_logs`.
+  - Broadcasts update via Redis Pub/Sub to trigger live dashboard refresh.
+- **`UNRESPONSIVE_PARTY` & `SLA_DELAY_WARNING`**:
+  - Sets `ValuationCase.is_stalled = True`.
+  - Records a `WorkflowBottleneck` with classification (`category`), severity, and message context.
+  - Invokes Google Gemini / AI drafting agent to generate a tailored SMS / email intervention addressed to the valuer/broker (`assigned_party.phone`) calibrated to urgency (`CRITICAL` $\rightarrow$ Escalated, `HIGH` $\rightarrow$ Firm, `MEDIUM/LOW` $\rightarrow$ Gentle).
+  - Persists the intervention in `agent_interventions` as `DRAFTED` for operator review (or auto-dispatches if `HUMAN_IN_THE_LOOP=false`).
+  - Broadcasts update via Redis Pub/Sub to the Operations Dashboard.
+
+### 4. Real-Time Telemetry & Dashboard Streaming
+Sentinel provides a Server-Sent Events (SSE) endpoint:
+- **`GET /api/dashboard/events`**: Continuously streams real-time Sentinel events from the Redis `sentinel:events` pub/sub channel.
+- The Operations Dashboard (`frontend/src/App.jsx`) connects on mount, displaying instantaneous toast notifications and refreshing KPI summary cards and pending approval queues without requiring manual page reload.
+
+### 5. Simulating Webhooks Locally
+Use the bundled CLI simulation script to test webhook delivery against a running Sentinel instance:
+```bash
+# Simulate an Unresponsive Valuer SLA breach
+python scripts/simulate_webhook.py --type UNRESPONSIVE_PARTY --severity CRITICAL --app-no MK-88A9C12E
+
+# Simulate a Status Transition
+python scripts/simulate_webhook.py --type STATUS_CHANGED --app-no MK-88A9C12E
+```
+
+---
+
 ## 🧪 Running Automated Tests
 
-Run the complete test suite (31 unit, integration, and E2E tests) with `pytest`:
+Run the complete test suite (35+ unit, integration, webhook, and E2E tests) with `pytest`:
 ```bash
 pytest
 ```
 *(Or via uv: `uv run pytest -v`)*
+
+### ⚡ Running the Webhook Integration Test Suite
+Execute the webhook test suite (`tests/test_webhooks.py`) validating Bearer authentication, Redis deduplication, case synchronization, bottleneck creation, and reminder drafting:
+```bash
+pytest tests/test_webhooks.py -v
+```
+*(Or via uv: `uv run pytest tests/test_webhooks.py -v`)*
 
 ### 🔄 Running the End-to-End Integration Test
 Execute the end-to-end integration test (`tests/test_e2e.py`) validating case injection, worker SLA scanning, PostgreSQL draft generation, API approval, and notification dispatcher calls:

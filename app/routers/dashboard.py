@@ -1,13 +1,17 @@
+import asyncio
+import json
 from collections import defaultdict
 from datetime import datetime, timezone
 import logging
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.redis import get_redis_client
 from app.db.session import get_async_session
 from app.models.agent import AgentIntervention, AgentMetrics, InterventionStatus
 from app.services.digivaluer_client import DigiValuerClient, get_digivaluer_client
@@ -309,3 +313,42 @@ async def get_dashboard_metrics(
         "completion_rate_percentage": completion_rate,
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@router.get("/events")
+async def dashboard_events():
+    """Server-Sent Events (SSE) stream broadcasting real-time Sentinel events from Redis."""
+    async def event_generator():
+        pubsub = None
+        try:
+            client = get_redis_client()
+            pubsub = client.pubsub()
+            await pubsub.subscribe("sentinel:events")
+            yield f"data: {json.dumps({'type': 'CONNECTED', 'message': 'Subscribed to Sentinel event stream'})}\n\n"
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message and message.get("type") == "message":
+                    raw_data = message.get("data", "")
+                    yield f"data: {raw_data}\n\n"
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("SSE stream error or disconnected: %s", exc)
+        finally:
+            if pubsub:
+                try:
+                    await pubsub.unsubscribe("sentinel:events")
+                    await pubsub.close()
+                except Exception:
+                    pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

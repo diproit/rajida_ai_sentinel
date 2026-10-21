@@ -64,6 +64,33 @@ export default function App() {
 
   useEffect(() => {
     fetchDashboardData();
+
+    // Subscribe to real-time Sentinel events via Server-Sent Events (SSE)
+    let eventSource;
+    try {
+      eventSource = new EventSource(`${API_BASE}/api/dashboard/events`);
+      eventSource.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type && payload.type !== 'CONNECTED') {
+            fetchDashboardData();
+            if (payload.type === 'STATUS_CHANGED') {
+              showToast(`Webhook event: Case ${payload.data?.case_number || ''} transitioned to ${payload.data?.new_status || 'new status'}`);
+            } else if (payload.type === 'UNRESPONSIVE_PARTY' || payload.type === 'SLA_DELAY_WARNING') {
+              showToast(`Webhook alert: ${payload.type} on Case ${payload.data?.case_number || ''}`, 'error');
+            }
+          }
+        } catch (e) {
+          console.debug('SSE parse error', e);
+        }
+      };
+    } catch (err) {
+      console.debug('SSE connection skipped:', err);
+    }
+
+    return () => {
+      if (eventSource) eventSource.close();
+    };
   }, []);
 
   // Keyboard accessibility: Close modal on Escape key & manage scroll lock
